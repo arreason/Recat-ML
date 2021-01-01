@@ -6,8 +6,8 @@ from typing import Dict, Tuple, Generator
 import pickle
 import torch
 from data.config import (raw_dataset_pat, preproc_pat)
-from catlearn.utils import one_hot
-from catlearn.tensor_utils import Tsor
+from catlearn.utils.numerics import one_hot
+from catlearn.utils.numerics import Tsor
 import data.utils as data_utils
 
 class Dataset():
@@ -47,13 +47,13 @@ class Dataset():
         self.entity_id2vec: Dict = None
         self.relation_id2vec: Dict = None
         self.node2vec_path: str = node2vec_path
-        self.train: Generator[Tuple[int, int, Dict[int, Tsor]]] = None
+        self.train: CallableGenerator[Tuple[int, int, Dict[int, Tsor]]] = None
         self.valid: Generator[Tuple[int, int, Dict[int, Tsor]]] = None
         self.test: Generator[Tuple[int, int, Dict[int, Tsor]]] = None
         self.from_file()
 
     def from_file(self):
-        """reads dataset from path
+        """reads dataset from path 
         if path argument is provided, it overwrites the default
         path stored in self.path
 
@@ -63,13 +63,13 @@ class Dataset():
         self.read_id_maps()
         self.init_entity_vectors()
         self.init_relation_vectors()
-        self.train = self.format_dataset(
+        self.train = lambda: self.format_dataset(
             self.read_file(os.path.join(self.path, self.ds_pat['train']))
         )
-        self.valid = self.format_dataset(
+        self.valid = lambda: self.format_dataset(
             self.read_file(os.path.join(self.path, self.ds_pat['valid']))
         )
-        self.test = self.format_dataset(
+        self.test = lambda: self.format_dataset(
             self.read_file(os.path.join(self.path, self.ds_pat['test']))
         )
 
