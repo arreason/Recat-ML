@@ -6,11 +6,11 @@ A library for graph utilities used in our project.
 """
 # from __future__ import annotations
 from typing import (
-    Iterable, FrozenSet, Sequence, TypeVar, Generic,
+    Iterable, FrozenSet, Sequence, TypeVar, Generic, Union,
     Optional, Callable, Tuple, Iterator, Type, Any, Mapping)
 from itertools import chain, product
 import warnings
-from collections import abc
+from collections import abc, defaultdict
 import random
 import pickle
 
@@ -69,6 +69,17 @@ class DirectedGraph(Generic[NodeType], DiGraph, abc.MutableMapping):  # pylint: 
                 labels = children[child]  # type: ignore
                 if isinstance(labels, Mapping):
                     self[node][child].update(labels)
+
+    @property
+
+    def labeled_edges(self) -> Iterator[Tuple[NodeType, NodeType, Any]]:
+        """
+        list all edges with labels of the graph.
+        Counts an edge multiple times if it has several labels, once per label
+        """
+        return chain(*(
+            ((src, tar, label, value) for (label, value) in labels.items())
+            for (src, tar, labels) in self.edges(data=True)))
 
     @property
     def op(self) -> 'DirectedGraph[NodeType]':
@@ -551,6 +562,91 @@ def generate_random_graph(
     return factory.graphs[idx]
 
 
+def sample_vertices(
+        graph: DirectedGraph[NodeType],
+        sample_vertices_size: int,
+        ranking: Callable[[Iterable[NodeType]], Mapping[NodeType, float]],
+        rng: random.Random) -> DirectedGraph[NodeType]:
+    """
+    Sample a random subgraph of `graph` with respect to a probability
+    distribution `ranking` over the vertices.
+
+    Params:
+    - graph: Input graph
+    - sample_vertices_size: number of vertices to sample
+        (with replacement so actual number might be lower)
+    - ranking: probability distribution over the input graph vertices
+    - rng: Random generator
+
+    Returns:
+    A valid random subgraph
+
+    """
+    ranks = list(ranking(graph).items())
+    vertices, weights = zip(*ranks)
+    total_weight = sum(weights)
+    sampled_vertices = set(rng.choices(
+        vertices, [weight/total_weight for weight in weights],
+        k=int(sample_vertices_size)))
+    return graph.subgraph(sampled_vertices)
+
+
+def sample_edges(
+        graph: DirectedGraph[NodeType],
+        sample_edges_size: int,
+        ranking: Callable[
+            [Union[
+                Iterable[Tuple[NodeType, NodeType]],
+                Iterable[Tuple[NodeType, NodeType, Any]],
+            ]],
+            Mapping[Tuple[NodeType, NodeType, Any, Any], float]],
+        rng: random.Random,
+        with_labels: bool = False,
+    ) -> DirectedGraph[NodeType]:
+    """
+    Sample a random subgraph of `graph` with respect to a probability
+    distribution `ranking` over the edges. Keeps all the vertices.
+
+    Params:
+    - graph: Input graph
+    - sample_edges_size: number of edges to sample
+        (with replacement so actual number might be lower)
+    - ranking: probability distribution over the input graph edges
+    - rng: Random generator
+    - if with_labels is False, will sample edges of the graph without
+    taking into account the labels. Otherwise it will treat the graph
+    as a multigraph, and count one edge per label (hence if no labels
+    are given an edge is considered as non existing)
+
+    Returns:
+    A valid random subgraph
+
+    """
+    graph_edges = list(graph.labeled_edges if with_labels else graph.edges)
+
+    if not graph_edges:
+        return graph.copy()
+
+    ranks = list(ranking(graph_edges).items())
+    edges, weights = zip(*ranks)
+    total_weight = sum(weights)
+    sampled_edges = set(rng.choices(
+        edges, [weight/total_weight for weight in weights],
+        k=int(sample_edges_size)))
+
+    output_graph = DirectedGraph({v: {} for v in graph})
+    for src, tar, *label in sampled_edges:
+        if not output_graph.has_edge(src, tar):
+            output_graph.add_edge(src, tar)
+
+        # if we're working with labels, the unpacking will yield a tuple
+        # with one element after src and tar
+        if with_labels:
+            output_graph[src][tar][label[0]] = graph[src][tar][label[0]]
+
+    return output_graph
+
+
 def pagerank_sample(
         graph: DirectedGraph[NodeType],
         sample_vertices_size: int,
@@ -563,8 +659,7 @@ def pagerank_sample(
     Pagerank calculation: see `networkx.pagerank`
     NB: `kwargs are all passed to `networkx.pagerank`
     """
-    #pylint: disable=unnecessary-lambda
-    return sample(
+    return sample_vertices(
         graph, sample_vertices_size, lambda g: pagerank(g, **kwargs), rng)
 
 
@@ -580,7 +675,7 @@ def hubs_sample(
     Pagerank calculation: see `networkx.hits`
     NB: `kwargs are all passed to `networkx.hits`
     """
-    return sample(
+    return sample_vertices(
         graph, sample_vertices_size, lambda g: hits(g, **kwargs)[0], rng)
 
 
@@ -596,7 +691,7 @@ def authorities_sample(
     Pagerank calculation: see `networkx.hits`
     NB: `kwargs are all passed to `networkx.hits`
     """
-    return sample(
+    return sample_vertices(
         graph, sample_vertices_size, lambda g: hits(g, **kwargs)[1], rng)
 
 
@@ -630,7 +725,7 @@ def sample(
     else:
         ranks = list(ranking(graph.edges).items())
         # Check if sample_vertices_size is odd
-        if sample_vertices_size & 1:
+        if sample_vertices_size:
             warning_str = (f'sample_vertices_size {sample_vertices_size} is odd '
             f'and will be rounded to floor even number {sample_vertices_size - 1}'
             'when with_edges=True')
@@ -650,7 +745,7 @@ def sample(
     return graph.subgraph(sampled_vertices)
 
 
-def uniform_sample(
+def uniform_vertex_sample(
         graph: DirectedGraph[NodeType],
         sample_vertices_size: int,
         rng: random.Random,
@@ -664,6 +759,21 @@ def uniform_sample(
     weight = 1./len(graph)
     return sample(graph, sample_vertices_size,
                   lambda G: {v: weight for v in G}, rng, with_edges)
+
+
+def uniform_edge_sample(
+        graph: DirectedGraph[NodeType],
+        sample_edges_size: int,
+        rng: random.Random,
+        with_labels: bool = False) -> DirectedGraph[NodeType]:
+    """
+    Sample a random subgraph of `graph` with a uniform probability over edges
+
+    Details of parameters: see `sample_edges`
+    """
+    return sample_edges(
+        graph, sample_edges_size,
+        lambda G: {e: 1. for e in G}, rng, with_labels=with_labels)
 
 
 def random_walk_vertex_sample(
